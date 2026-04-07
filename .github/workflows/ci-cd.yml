@@ -18,9 +18,9 @@ permissions:
   contents: read
 
 env:
-  DOCKER_REGISTRY: ghcr.io
-  BACKEND_IMAGE: ghcr.io/${{ github.repository }}/jerney-backend
-  FRONTEND_IMAGE: ghcr.io/${{ github.repository }}/jerney-frontend
+  DOCKER_REGISTRY: docker.io                              # ← Changed to Docker Hub
+  BACKEND_IMAGE: hemanthdo/jerney-backend                 # ← Your Docker Hub image
+  FRONTEND_IMAGE: hemanthdo/jerney-frontend               # ← Your Docker Hub image
 
 jobs:
   # ==============================================================
@@ -77,11 +77,9 @@ jobs:
         working-directory: ${{ matrix.component }}
         run: npm ci
 
-      # npm audit for known vulnerabilities (fail on high/critical)
       - name: npm audit
         working-directory: ${{ matrix.component }}
         run: npm audit --audit-level=high || true
-        # `|| true` to not fail on moderate — adjust in prod
 
   # ==============================================================
   # STAGE 3: Build & Push Container Images
@@ -92,7 +90,6 @@ jobs:
     needs: sca
     permissions:
       contents: read
-      packages: write # Needed to push to GHCR
     strategy:
       matrix:
         component: [backend, frontend]
@@ -103,18 +100,19 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Log in to GitHub Container Registry
+      - name: Log in to Docker Hub                        # ← Changed from GHCR to Docker Hub
         uses: docker/login-action@v3
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}     # ← Add this secret in GitHub
+          password: ${{ secrets.DOCKERHUB_TOKEN }}        # ← Add this secret in GitHub
 
       - name: Extract metadata (tags, labels)
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository }}/jerney-${{ matrix.component }}
+          images: |
+            ${{ matrix.component == 'backend' && env.BACKEND_IMAGE || env.FRONTEND_IMAGE }}
           tags: |
             type=sha,prefix=
             type=ref,event=branch
@@ -130,7 +128,6 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          # Security: provenance and SBOM
           provenance: true
           sbom: true
 
@@ -182,7 +179,7 @@ jobs:
           directory: terraform/
           framework: terraform
           soft_fail: false
-          skip_check: CKV_AWS_39,CKV_AWS_58  # Public EKS endpoint (intentional for dev)
+          skip_check: CKV_AWS_39,CKV_AWS_58
           output_format: cli
 
       - name: Run Checkov on Kubernetes manifests
@@ -190,7 +187,7 @@ jobs:
         with:
           directory: k8s/
           framework: kubernetes
-          soft_fail: true  # Soft fail for K8s (some checks may not apply)
+          soft_fail: true
           output_format: cli
 
   # ==============================================================
@@ -215,14 +212,14 @@ jobs:
 
   # ==============================================================
   # STAGE 7: Update K8s Manifest with New Image Tag
-  # Only runs on push to main (not on PRs)
+  # Only runs on push (not on PRs)
   # ==============================================================
   update-manifest:
     name: "🚀 Update K8s Manifest"
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' 
+    if: github.event_name == 'push'
     permissions:
-      contents: write # Needed to push manifest changes
+      contents: write
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -237,17 +234,15 @@ jobs:
         run: |
           IMAGE_TAG=${{ steps.sha.outputs.short }}
 
-          # Find the line number of the backend container image
-          # (the image: line right after `- name: backend`)
+          # Update backend image tag in k8s manifest
           BACKEND_LINE=$(awk '/- name: backend/{found=1} found && /image:/{print NR; exit}' k8s/jerney.yaml)
           echo "Backend image at line: ${BACKEND_LINE}"
-          sed -i "${BACKEND_LINE}s|.*|          image: ${BACKEND_IMAGE}:${IMAGE_TAG}|" k8s/jerney.yaml
+          sed -i "${BACKEND_LINE}s|.*|          image: hemanthdo/jerney-backend:${IMAGE_TAG}|" k8s/jerney.yaml
 
-          # Find the line number of the frontend container image
-          # (the image: line right after `- name: frontend`)
+          # Update frontend image tag in k8s manifest
           FRONTEND_LINE=$(awk '/- name: frontend/{found=1} found && /image:/{print NR; exit}' k8s/jerney.yaml)
           echo "Frontend image at line: ${FRONTEND_LINE}"
-          sed -i "${FRONTEND_LINE}s|.*|          image: ${FRONTEND_IMAGE}:${IMAGE_TAG}|" k8s/jerney.yaml
+          sed -i "${FRONTEND_LINE}s|.*|          image: hemanthdo/jerney-frontend:${IMAGE_TAG}|" k8s/jerney.yaml
 
           echo "✅ Updated images to tag: ${IMAGE_TAG}"
           grep -n "image:" k8s/jerney.yaml
